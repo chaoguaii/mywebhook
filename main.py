@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Request
-import requests
 import os
+import requests
 
 app = FastAPI()
 
-# ดึง LINE Access Token จาก Environment Variable
+# ✅ ตรวจสอบว่า LINE_ACCESS_TOKEN โหลดมาถูกต้องหรือไม่
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+if not LINE_ACCESS_TOKEN:
+    raise ValueError("❌ LINE_ACCESS_TOKEN is missing! Please set it in Cloud Run.")
 
 # เก็บข้อมูลของผู้ใช้ระหว่างการคำนวณ
 USER_SESSIONS = {}
@@ -14,18 +16,12 @@ MATERIAL_COSTS = {
     "PVC": 90, "PET": 100, "PMMA": 150, "POM": 350, "PU": 400
 }
 
-# ✅ ตรวจสอบว่า LINE_ACCESS_TOKEN โหลดมาถูกต้องหรือไม่
-LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-if not LINE_ACCESS_TOKEN:
-    raise ValueError("❌ LINE_ACCESS_TOKEN is missing! Please set it in Cloud Run.")
-
 @app.post("/callback")
 async def line_webhook(request: Request):
     try:
         payload = await request.json()
         print("📩 Received Payload:", payload)
 
-        # ✅ ตรวจสอบว่ามี "events" หรือไม่
         if "events" not in payload:
             print("⚠️ No events found in payload!")
             return {"status": "no events"}
@@ -33,7 +29,6 @@ async def line_webhook(request: Request):
         for event in payload["events"]:
             print(f"🔍 Event Received: {event}")  # ✅ Log Event ที่ได้รับจาก LINE
 
-            # ✅ ตรวจสอบว่า Event มี message หรือไม่
             if "message" not in event or "text" not in event["message"]:
                 print("⚠️ Event ไม่มีข้อความที่สามารถประมวลผลได้")
                 continue  # ป้องกัน KeyError
@@ -45,9 +40,9 @@ async def line_webhook(request: Request):
             print(f"📩 User: {user_id} | Message: {message_text}")  # ✅ Debugging
 
             if message_text == "เริ่มคำนวณ":
-                reply_message(reply_token, "✅ เริ่มคำนวณ กรุณาเลือกวัสดุ")
+                start_calculation(reply_token, user_id)
             else:
-                reply_message(reply_token, f"📩 คุณส่ง: {message_text}")
+                handle_response(reply_token, user_id, message_text)
 
         return {"status": "success"}
 
@@ -64,7 +59,11 @@ def start_calculation(reply_token, user_id):
 
 def handle_response(reply_token, user_id, message_text):
     """ จัดการการตอบกลับของผู้ใช้ในแต่ละขั้นตอน """
-    session = USER_SESSIONS.get(user_id, {})
+    if user_id not in USER_SESSIONS:
+        reply_message(reply_token, "⚠️ กรุณาเริ่มคำนวณใหม่โดยพิมพ์ 'เริ่มคำนวณ'")
+        return
+
+    session = USER_SESSIONS[user_id]
     step = session.get("step", 0)
 
     if step == 1:
@@ -114,7 +113,8 @@ def calculate_and_show_result(reply_token, user_id):
         f"✅ คำนวณต้นทุนสำเร็จ:\n"
         f"📌 วัสดุ: {material}\n"
         f"📌 ขนาด: {w}x{l}x{h} cm³\n"
-        f"📌 ปริมาตร: {volume:.2f} cm³\📌 น้ำหนักโดยประมาณ: {weight_kg:.2f} kg\n"
+        f"📌 ปริมาตร: {volume:.2f} cm³\n"
+        f"📌 น้ำหนักโดยประมาณ: {weight_kg:.2f} kg\n"
         f"📌 จำนวน: {quantity} ชิ้น\n"
         f"📌 ต้นทุนรวม: {total_cost:,.2f} บาท\n\n"
         f"ต้องการขอใบเสนอราคาไหม?"
@@ -134,30 +134,10 @@ def reply_message(reply_token, text):
         "replyToken": reply_token,
         "messages": [{"type": "text", "text": text}]
     }
-    
-    print(f"📤 Sending to LINE: {data}")  # ✅ Debugging Request ก่อนส่ง
-
-    response = requests.post(
-        "https://api.line.me/v2/bot/message/reply",
-        headers=headers,
-        json=data
-    )
-    
-    print(f"📤 LINE Response Status: {response.status_code}")  # ✅ ตรวจสอบ Response Code
-    print(f"📤 LINE Response Body: {response.text}")  # ✅ ดู Response Body
-
-    if response.status_code != 200:
-        print(f"❌ LINE API Error: {response.text}")  # ✅ ถ้ามี Error ให้พิมพ์ออกมา
-
+    response = requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=data)
+    print(f"📤 LINE Response Status: {response.status_code}")
+    print(f"📤 LINE Response Body: {response.text}")
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
-# ✅ ตรวจสอบว่า LINE_ACCESS_TOKEN ถูกต้องหรือไม่
-LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-if not LINE_ACCESS_TOKEN:
-    raise ValueError("❌ LINE_ACCESS_TOKEN is missing! Please set it in Cloud Run.")
-else:
-    print(f"✅ LINE_ACCESS_TOKEN is set! Length: {len(LINE_ACCESS_TOKEN)} characters")
-
