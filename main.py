@@ -18,31 +18,32 @@ async def line_webhook(request: Request):
 
     for event in payload["events"]:
         user_id = event["source"]["userId"]
+        reply_token = event["replyToken"]
         message_text = event["message"]["text"].strip()
 
         if message_text == "เริ่มคำนวณ":
-            start_calculation(user_id)
+            start_calculation(reply_token, user_id)
         else:
-            handle_response(user_id, message_text)
+            handle_response(reply_token, user_id, message_text)
 
     return {"status": "success"}
 
-def start_calculation(user_id):
+def start_calculation(reply_token, user_id):
     USER_SESSIONS[user_id] = {"step": 1}
-    send_message(user_id, "กรุณาเลือกวัสดุที่ต้องการผลิต:\nABS, PC, Nylon, PP, PE, PVC, PET, PMMA, POM, PU")
+    reply_message(reply_token, "กรุณาเลือกวัสดุที่ต้องการผลิต:\nABS, PC, Nylon, PP, PE, PVC, PET, PMMA, POM, PU")
 
-def handle_response(user_id, message_text):
+def handle_response(reply_token, user_id, message_text):
     session = USER_SESSIONS.get(user_id, {})
     step = session.get("step", 0)
 
     if step == 1:
         material = message_text.upper()
         if material not in MATERIAL_COSTS:
-            send_message(user_id, "❌ วัสดุไม่ถูกต้อง กรุณาเลือกจากรายการที่ให้ไว้")
+            reply_message(reply_token, "❌ วัสดุไม่ถูกต้อง กรุณาเลือกจากรายการที่ให้ไว้")
             return
         session["material"] = material
         session["step"] = 2
-        send_message(user_id, "กรุณากรอกขนาดชิ้นงาน (กว้างxยาวxสูง) cm เช่น 10.5x15.5x5.5")
+        reply_message(reply_token, "กรุณากรอกขนาดชิ้นงาน (กว้างxยาวxสูง) cm เช่น 10.5x15.5x5.5")
 
     elif step == 2:
         try:
@@ -51,9 +52,9 @@ def handle_response(user_id, message_text):
                 raise ValueError
             session["dimensions"] = dimensions
             session["step"] = 3
-            send_message(user_id, "กรุณากรอกจำนวนที่ต้องการผลิต (ตัวเลข)")
+            reply_message(reply_token, "กรุณากรอกจำนวนที่ต้องการผลิต (ตัวเลข)")
         except ValueError:
-            send_message(user_id, "❌ รูปแบบขนาดไม่ถูกต้อง กรุณากรอกใหม่ เช่น 10.5x15.5x5.5")
+            reply_message(reply_token, "❌ รูปแบบขนาดไม่ถูกต้อง กรุณากรอกใหม่ เช่น 10.5x15.5x5.5")
 
     elif step == 3:
         try:
@@ -61,11 +62,11 @@ def handle_response(user_id, message_text):
             if quantity <= 0:
                 raise ValueError
             session["quantity"] = quantity
-            calculate_and_show_result(user_id)
+            calculate_and_show_result(reply_token, user_id)
         except ValueError:
-            send_message(user_id, "❌ กรุณากรอกจำนวนที่ถูกต้อง เช่น 100")
+            reply_message(reply_token, "❌ กรุณากรอกจำนวนที่ถูกต้อง เช่น 100")
 
-def calculate_and_show_result(user_id):
+def calculate_and_show_result(reply_token, user_id):
     session = USER_SESSIONS[user_id]
     material = session["material"]
     w, l, h = session["dimensions"]
@@ -87,16 +88,16 @@ def calculate_and_show_result(user_id):
         f"ต้องการขอใบเสนอราคาไหม"
     )
 
-    send_message(user_id, response_message)
+    reply_message(reply_token, response_message)
     session["step"] = 4
 
-def send_message(user_id, text):
+def reply_message(reply_token, text):
     headers = {
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-    requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json={
-        "to": user_id,
+    requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json={
+        "replyToken": reply_token,
         "messages": [{"type": "text", "text": text}]
     })
 
