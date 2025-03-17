@@ -16,32 +16,38 @@ MATERIAL_COSTS = {
 
 @app.post("/callback")
 async def line_webhook(request: Request):
-    """ รับ Webhook Event จาก LINE """
     try:
         payload = await request.json()
         print("📩 Received Payload:", payload)
 
         if "events" not in payload:
+            print("⚠️ No events found in payload!")
             return {"status": "no events"}
 
         for event in payload["events"]:
+            print(f"🔍 Event Received: {event}")  # ✅ Log Event ที่ได้รับจาก LINE
+
             if "message" not in event or "text" not in event["message"]:
-                continue  # ข้าม event ที่ไม่มีข้อความ
+                print("⚠️ Event ไม่มีข้อความที่สามารถประมวลผลได้")
+                continue  # ป้องกัน KeyError
 
             user_id = event["source"]["userId"]
             reply_token = event["replyToken"]
             message_text = event["message"]["text"].strip()
 
+            print(f"📩 User: {user_id} | Message: {message_text}")  # ✅ Debugging
+
             if message_text == "เริ่มคำนวณ":
-                start_calculation(reply_token, user_id)
+                reply_message(reply_token, "✅ เริ่มคำนวณ กรุณาเลือกวัสดุ")
             else:
-                handle_response(reply_token, user_id, message_text)
+                reply_message(reply_token, f"📩 คุณส่ง: {message_text}")
 
         return {"status": "success"}
 
     except Exception as e:
         print(f"🔥 ERROR: {e}")
         return {"status": "error", "message": str(e)}
+
 
 
 def start_calculation(reply_token, user_id):
@@ -113,22 +119,39 @@ def calculate_and_show_result(reply_token, user_id):
 
 
 def reply_message(reply_token, text):
-    """ ส่งข้อความกลับไปที่ LINE Bot """
+    """ ส่งข้อความกลับไปที่ LINE """
     headers = {
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
+    data = {
+        "replyToken": reply_token,
+        "messages": [{"type": "text", "text": text}]
+    }
+    
+    print(f"📤 Sending to LINE: {data}")  # ✅ Debugging Request ก่อนส่ง
+
     response = requests.post(
         "https://api.line.me/v2/bot/message/reply",
         headers=headers,
-        json={
-            "replyToken": reply_token,
-            "messages": [{"type": "text", "text": text}]
-        }
+        json=data
     )
-    print(f"📤 Sent Message: {text} | Status Code: {response.status_code}")
+    
+    print(f"📤 LINE Response Status: {response.status_code}")  # ✅ ตรวจสอบ Response Code
+    print(f"📤 LINE Response Body: {response.text}")  # ✅ ดู Response Body
+
+    if response.status_code != 200:
+        print(f"❌ LINE API Error: {response.text}")  # ✅ ถ้ามี Error ให้พิมพ์ออกมา
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+# ✅ ตรวจสอบว่า LINE_ACCESS_TOKEN ถูกต้องหรือไม่
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+if not LINE_ACCESS_TOKEN:
+    raise ValueError("❌ LINE_ACCESS_TOKEN is missing! Please set it in Cloud Run.")
+else:
+    print(f"✅ LINE_ACCESS_TOKEN is set! Length: {len(LINE_ACCESS_TOKEN)} characters")
+
