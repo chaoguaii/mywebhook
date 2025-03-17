@@ -1,17 +1,31 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
+import requests
+import os
 
 app = FastAPI()
 
-@app.post("/callback")
-async def line_webhook(request: Request):
-    payload = await request.json()
-    print(payload)
-    return {"status": "success"}
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+
 USER_SESSIONS = {}
 MATERIAL_COSTS = {
     "ABS": 200, "PC": 250, "Nylon": 350, "PP": 70, "PE": 60,
     "PVC": 90, "PET": 100, "PMMA": 150, "POM": 350, "PU": 400
 }
+
+@app.post("/callback")
+async def line_webhook(request: Request):
+    payload = await request.json()
+
+    for event in payload["events"]:
+        user_id = event["source"]["userId"]
+        message_text = event["message"]["text"].strip()
+
+        if message_text == "เริ่มคำนวณ":
+            start_calculation(user_id)
+        else:
+            handle_response(user_id, message_text)
+
+    return {"status": "success"}
 
 def start_calculation(user_id):
     USER_SESSIONS[user_id] = {"step": 1}
@@ -58,7 +72,7 @@ def calculate_and_show_result(user_id):
     quantity = session["quantity"]
 
     volume = w * l * h
-    density = 1.05  # สมมติเป็นค่าคงที่
+    density = 1.05
     weight_kg = (volume * density) / 1000
     total_cost = weight_kg * quantity * MATERIAL_COSTS[material]
 
@@ -76,9 +90,16 @@ def calculate_and_show_result(user_id):
     send_message(user_id, response_message)
     session["step"] = 4
 
-# ตัวอย่างฟังก์ชั่นการส่งข้อความ
 def send_message(user_id, text):
-    requests.post("https://api.line.me/v2/bot/message/push", headers={
-        "Authorization": f"Bearer {Y5yqTfXYXBdsgma0vdIw+BBGSucFJp0qceYfip2+Cp0Bn7cuu7HmjDPg1pvMiREtWIsJJHXpYftpxQi60rF7GMdMkEATBDjlJ1OwpgKBgU6ts8xqf2Wdlcf8WjGIqliqRhjgY+A8tRKJtHAB37d3YgdB04t89/1O/w1cDnyilFU=}",
+    headers = {
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
         "Content-Type": "application/json"
-    }, json={"to": user_id, "messages": [{"type": "text", "text": text}]})
+    }
+    requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json={
+        "to": user_id,
+        "messages": [{"type": "text", "text": text}]
+    })
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
