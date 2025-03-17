@@ -50,7 +50,7 @@ async def line_webhook(request: Request):
         else:
             handle_response(reply_token, user_id, message_text)
 
-    return {"status": "success"}
+    return {"status": "success"}  # ✅ ส่งกลับ status code 200
 
 def start_calculation(reply_token, user_id):
     """ เริ่มกระบวนการคำนวณ """
@@ -115,25 +115,47 @@ def handle_response(reply_token, user_id, message_text):
         except ValueError:
             reply_message(reply_token, "❌ กรุณากรอกจำนวนที่ถูกต้อง เช่น 100")
 
-def request_quotation(reply_token, user_id):
-    """ บันทึกคำสั่งซื้อไปยัง BigQuery และขอข้อมูลลูกค้า """
-    session = USER_SESSIONS.get(user_id, {})
-    if not session:
-        reply_message(reply_token, "⚠️ ไม่มีข้อมูล กรุณาเริ่มคำนวณใหม่")
-        return
+    elif step == 4:
+        if message_text == "ขอใบเสนอราคา":
+            session["step"] = 5
+            reply_message(reply_token, "กรุณากรอกข้อมูลของคุณ (ชื่อ, เบอร์โทร, Email) คั่นด้วยเครื่องหมายจุลภาค (,)")
+        else:
+            reply_message(reply_token, "❌ กรุณาพิมพ์ 'ขอใบเสนอราคา' เพื่อดำเนินการต่อ")
 
-    session["step"] = 5
-    reply_message(reply_token, "กรุณากรอกข้อมูลของคุณ (ชื่อ, เบอร์โทร, Email)")
+    elif step == 5:
+        try:
+            name, phone, email = message_text.split(",")
+            name = name.strip()
+            phone = phone.strip()
+            email = email.strip()
 
-def request_customer_info(reply_token, user_id):
-    """ ขอข้อมูลลูกค้าเพื่อบันทึกใบเสนอราคา """
-    session = USER_SESSIONS.get(user_id, {})
-    if not session:
-        reply_message(reply_token, "⚠️ ไม่มีข้อมูล กรุณาเริ่มคำนวณใหม่")
-        return
+            # บันทึกข้อมูลลง BigQuery
+            material = session["material"]
+            dimensions = session["dimensions"]
+            quantity = session["quantity"]
+            cost = session["cost"]
+            size = "x".join(map(str, dimensions))
+            volume = dimensions[0] * dimensions[1] * dimensions[2]
+            weight_kg = (volume * 1.05) / 1000
 
-    session["step"] = 6
-    reply_message(reply_token, "กรุณากรอกข้อมูลของคุณ (ชื่อ, เบอร์โทร, Email)")
+            save_success = save_order_to_bigquery(
+                user_id, material, size, volume, weight_kg, quantity, cost, name, phone, email
+            )
+
+            if save_success:
+                reply_message(reply_token, f"""✅ บันทึกข้อมูลสำเร็จ
+📌 ชื่อ: {name}
+📌 เบอร์โทร: {phone}
+📌 อีเมล: {email}
+
+ขอบคุณที่ใช้บริการของเรา!
+""")
+                del USER_SESSIONS[user_id]  # ลบ session หลังจากบันทึกข้อมูลเสร็จ
+            else:
+                reply_message(reply_token, "⚠️ เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง")
+        except Exception as e:
+            print(f"🔥 ERROR: {e}")
+            reply_message(reply_token, "❌ รูปแบบข้อมูลไม่ถูกต้อง กรุณากรอกใหม่ เช่น 'ชื่อ, เบอร์โทร, อีเมล'")
 
 def save_order_to_bigquery(user_id, material, size, volume, weight_kg, quantity, total_cost, name, phone, email):
     """ บันทึกข้อมูลลง BigQuery """
