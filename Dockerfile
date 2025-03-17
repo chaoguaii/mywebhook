@@ -1,17 +1,17 @@
-# Use Python 3.11 as Base Image
+# ใช้ Python 3.11 เป็น Base Image
 FROM python:3.11
 
-# Set working directory
+# ตั้งค่า Working Directory
 WORKDIR /app
 
-# Copy application files
+# คัดลอกไฟล์ทั้งหมดไปที่ Container
 COPY . /app
 
-# Install dependencies
+# ติดตั้ง Dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose port 8080 to allow incoming connections
+# เปิดพอร์ต 8080 ให้ Container ใช้งาน
 EXPOSE 8080
 
-# Run application with uvicorn
+# รันแอปด้วย Uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
