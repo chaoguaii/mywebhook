@@ -14,12 +14,18 @@ MATERIAL_COSTS = {
     "PVC": 90, "PET": 100, "PMMA": 150, "POM": 350, "PU": 400
 }
 
+# ✅ ตรวจสอบว่า LINE_ACCESS_TOKEN โหลดมาถูกต้องหรือไม่
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+if not LINE_ACCESS_TOKEN:
+    raise ValueError("❌ LINE_ACCESS_TOKEN is missing! Please set it in Cloud Run.")
+
 @app.post("/callback")
 async def line_webhook(request: Request):
     try:
         payload = await request.json()
         print("📩 Received Payload:", payload)
 
+        # ✅ ตรวจสอบว่ามี "events" หรือไม่
         if "events" not in payload:
             print("⚠️ No events found in payload!")
             return {"status": "no events"}
@@ -27,6 +33,7 @@ async def line_webhook(request: Request):
         for event in payload["events"]:
             print(f"🔍 Event Received: {event}")  # ✅ Log Event ที่ได้รับจาก LINE
 
+            # ✅ ตรวจสอบว่า Event มี message หรือไม่
             if "message" not in event or "text" not in event["message"]:
                 print("⚠️ Event ไม่มีข้อความที่สามารถประมวลผลได้")
                 continue  # ป้องกัน KeyError
@@ -47,7 +54,6 @@ async def line_webhook(request: Request):
     except Exception as e:
         print(f"🔥 ERROR: {e}")
         return {"status": "error", "message": str(e)}
-
 
 
 def start_calculation(reply_token, user_id):
