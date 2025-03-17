@@ -1,144 +1,143 @@
-from fastapi import FastAPI, Request
 import os
-import requests
+import uuid
+from datetime import datetime
+from google.cloud import bigquery
+from fastapi import FastAPI, Request
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import FollowEvent
+
+# ตั้งค่า Google Cloud Project
+PROJECT_ID = "your_project_id"
+DATASET_ID = "mold_plastic_db"
+
+client = bigquery.Client(project=PROJECT_ID)
+
+# ตั้งค่า LINE Messaging API
+LINE_ACCESS_TOKEN = "your_line_channel_access_token"
+LINE_SECRET = "your_line_channel_secret"
+
+line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_SECRET)
 
 app = FastAPI()
 
-# ✅ ตรวจสอบว่า LINE_ACCESS_TOKEN โหลดมาถูกต้องหรือไม่
-LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-if not LINE_ACCESS_TOKEN:
-    raise ValueError("❌ LINE_ACCESS_TOKEN is missing! Please set it in Cloud Run.")
+# เก็บข้อมูลลูกค้าชั่วคราว
+customer_data = {}
 
-# เก็บข้อมูลของผู้ใช้ระหว่างการคำนวณ
-USER_SESSIONS = {}
-MATERIAL_COSTS = {
-    "ABS": 200, "PC": 250, "Nylon": 350, "PP": 70, "PE": 60,
-    "PVC": 90, "PET": 100, "PMMA": 150, "POM": 350, "PU": 400
-}
+# ฟังก์ชันดึงราคาสินค้าจาก BigQuery
+def calculate_price(product_type, dimensions, quantity):
+    query = f"""
+        SELECT base_price FROM `{PROJECT_ID}.{DATASET_ID}.pricing_data`
+        WHERE product_type = '{product_type}' AND size_range = '{dimensions}'
+    """
+    result = client.query(query).result()
+    for row in result:
+        return row.base_price * quantity
+    return None
+
+# ฟังก์ชันบันทึกใบเสนอราคา
+def save_quotation_request(user_id, customer_name, product_type, dimensions, quantity):
+    quotation_id = str(uuid.uuid4())
+    estimated_price = calculate_price(product_type, dimensions, quantity)
+
+    if estimated_price is None:
+        return None
+
+    data = [
+        {
+            "quotation_id": quotation_id,
+            "customer_name": customer_name,
+            "product_type": product_type,
+            "dimensions": dimensions,
+            "quantity": quantity,
+            "estimated_price": estimated_price,
+            "request_date": datetime.utcnow(),
+        }
+    ]
+
+    table_ref = client.dataset(DATASET_ID).table("quotation_requests")
+    client.insert_rows_json(table_ref, data)
+    return quotation_id, estimated_price
+
+# ฟังก์ชันตรวจสอบสถานะคำสั่งซื้อ
+def check_order_status(order_id):
+    query = f"""
+        SELECT order_status, order_date FROM `{PROJECT_ID}.{DATASET_ID}.customer_orders`
+        WHERE order_id = '{order_id}'
+    """
+    result = client.query(query).result()
+    for row in result:
+        return f"📦 คำสั่งซื้อ {order_id} สถานะ: {row.order_status} (วันที่: {row.order_date})"
+    return "❌ ไม่พบคำสั่งซื้อ"
 
 @app.post("/callback")
-async def line_webhook(request: Request):
+async def callback(request: Request):
+    signature = request.headers["X-Line-Signature"]
+    body = await request.body()
+
     try:
-        payload = await request.json()
-        print("📩 Received Payload:", payload)
+        handler.handle(body.decode(), signature)
+    except InvalidSignatureError:
+        return {"error": "Invalid Signature"}
 
-        if "events" not in payload:
-            print("⚠️ No events found in payload!")
-            return {"status": "no events"}
+    return {"message": "OK"}
 
-        for event in payload["events"]:
-            print(f"🔍 Event Received: {event}")  # ✅ Log Event ที่ได้รับจาก LINE
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    text = event.message.text.strip()
 
-            if "message" not in event or "text" not in event["message"]:
-                print("⚠️ Event ไม่มีข้อความที่สามารถประมวลผลได้")
-                continue  # ป้องกัน KeyError
+    if text.lower().startswith("ขอราคาสินค้า"):
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="กรุณาระบุชนิดพลาสติก (เช่น ABS, PP, PET)"))
+        customer_data[user_id] = {}
 
-            user_id = event["source"]["userId"]
-            reply_token = event["replyToken"]
-            message_text = event["message"]["text"].strip()
+    elif user_id in customer_data:
+        if "product_type" not in customer_data[user_id]:
+            customer_data[user_id]["product_type"] = text
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="กรุณาระบุขนาด (เช่น 10x10 cm, 20x20 cm)"))
 
-            print(f"📩 User: {user_id} | Message: {message_text}")  # ✅ Debugging
+        elif "dimensions" not in customer_data[user_id]:
+            customer_data[user_id]["dimensions"] = text
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="กรุณาระบุจำนวนที่ต้องการ"))
 
-            if message_text == "เริ่มคำนวณ":
-                start_calculation(reply_token, user_id)
+        elif "quantity" not in customer_data[user_id]:
+            customer_data[user_id]["quantity"] = int(text)
+            data = customer_data[user_id]
+            estimated_price = calculate_price(data["product_type"], data["dimensions"], data["quantity"])
+
+            if estimated_price:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"💰 ราคาประเมิน: {estimated_price:.2f} บาท\nต้องการขอใบเสนอราคาหรือไม่? (พิมพ์: 'ขอใบเสนอราคา')"))
             else:
-                handle_response(reply_token, user_id, message_text)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ ไม่พบข้อมูลสินค้า กรุณาตรวจสอบอีกครั้ง"))
+                del customer_data[user_id]
 
-        return {"status": "success"}
+    elif text.lower().startswith("ขอใบเสนอราคา"):
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="กรุณาพิมพ์ชื่อของคุณ"))
 
-    except Exception as e:
-        print(f"🔥 ERROR: {e}")
-        return {"status": "error", "message": str(e)}
+    elif "customer_name" not in customer_data[user_id]:
+        customer_data[user_id]["customer_name"] = text
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="กรุณาพิมพ์อีเมลของคุณ"))
 
+    elif "customer_email" not in customer_data[user_id]:
+        customer_data[user_id]["customer_email"] = text
+        data = customer_data[user_id]
+        quotation_id, estimated_price = save_quotation_request(
+            user_id, data["customer_name"], data["product_type"], data["dimensions"], data["quantity"]
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ ขอใบเสนอราคาเรียบร้อย!\nหมายเลขใบเสนอราคา: {quotation_id}\nราคาประเมิน: {estimated_price:.2f} บาท"))
+        del customer_data[user_id]
 
-def start_calculation(reply_token, user_id):
-    """ เริ่มกระบวนการคำนวณ """
-    USER_SESSIONS[user_id] = {"step": 1}
-    reply_message(reply_token, "กรุณาเลือกวัสดุที่ต้องการผลิต:\nABS, PC, Nylon, PP, PE, PVC, PET, PMMA, POM, PU")
+    elif text.lower().startswith("ติดตามคำสั่งซื้อ"):
+        order_id = text.split(" ")[1]
+        status = check_order_status(order_id)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=status))
 
-
-def handle_response(reply_token, user_id, message_text):
-    """ จัดการการตอบกลับของผู้ใช้ในแต่ละขั้นตอน """
-    if user_id not in USER_SESSIONS:
-        reply_message(reply_token, "⚠️ กรุณาเริ่มคำนวณใหม่โดยพิมพ์ 'เริ่มคำนวณ'")
-        return
-
-    session = USER_SESSIONS[user_id]
-    step = session.get("step", 0)
-
-    if step == 1:
-        material = message_text.upper()
-        if material not in MATERIAL_COSTS:
-            reply_message(reply_token, "❌ วัสดุไม่ถูกต้อง กรุณาเลือกจากรายการที่ให้ไว้")
-            return
-        session["material"] = material
-        session["step"] = 2
-        reply_message(reply_token, "กรุณากรอกขนาดชิ้นงาน (กว้างxยาวxสูง) cm เช่น 10.5x15.5x5.5")
-
-    elif step == 2:
-        try:
-            dimensions = list(map(float, message_text.lower().replace(' ', '').split('x')))
-            if len(dimensions) != 3:
-                raise ValueError
-            session["dimensions"] = dimensions
-            session["step"] = 3
-            reply_message(reply_token, "กรุณากรอกจำนวนที่ต้องการผลิต (ตัวเลข)")
-        except ValueError:
-            reply_message(reply_token, "❌ รูปแบบขนาดไม่ถูกต้อง กรุณากรอกใหม่ เช่น 10.5x15.5x5.5")
-
-    elif step == 3:
-        try:
-            quantity = int(message_text)
-            if quantity <= 0:
-                raise ValueError
-            session["quantity"] = quantity
-            calculate_and_show_result(reply_token, user_id)
-        except ValueError:
-            reply_message(reply_token, "❌ กรุณากรอกจำนวนที่ถูกต้อง เช่น 100")
-
-
-def calculate_and_show_result(reply_token, user_id):
-    """ คำนวณต้นทุนผลิตภัณฑ์ """
-    session = USER_SESSIONS[user_id]
-    material = session["material"]
-    w, l, h = session["dimensions"]
-    quantity = session["quantity"]
-
-    volume = w * l * h
-    density = 1.05
-    weight_kg = (volume * density) / 1000
-    total_cost = weight_kg * quantity * MATERIAL_COSTS[material]
-
-    response_message = (
-        f"✅ คำนวณต้นทุนสำเร็จ:\n"
-        f"📌 วัสดุ: {material}\n"
-        f"📌 ขนาด: {w}x{l}x{h} cm³\n"
-        f"📌 ปริมาตร: {volume:.2f} cm³\n"
-        f"📌 น้ำหนักโดยประมาณ: {weight_kg:.2f} kg\n"
-        f"📌 จำนวน: {quantity} ชิ้น\n"
-        f"📌 ต้นทุนรวม: {total_cost:,.2f} บาท\n\n"
-        f"ต้องการขอใบเสนอราคาไหม?"
-    )
-
-    reply_message(reply_token, response_message)
-    session["step"] = 4
-
-
-def reply_message(reply_token, text):
-    """ ส่งข้อความกลับไปที่ LINE """
-    headers = {
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text}]
-    }
-    response = requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=data)
-    print(f"📤 LINE Response Status: {response.status_code}")
-    print(f"📤 LINE Response Body: {response.text}")
+@handler.add(FollowEvent)
+def handle_follow(event):
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="👋 ยินดีต้อนรับ! พิมพ์ 'ขอราคาสินค้า' เพื่อเริ่มต้น"))
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
-
+    uvicorn.run(app, host="0.0.0.0", port=8000)
