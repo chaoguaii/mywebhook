@@ -1,5 +1,4 @@
-requests
-google-cloud-bigquery
 fastapi
 uvicorn
-
+line-bot-sdk
+google-cloud-bigquery
