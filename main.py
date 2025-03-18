@@ -6,19 +6,18 @@ from googleapiclient.discovery import build
 
 app = Flask(__name__)
 
-# 🔹 ใช้ Environment Variables
+# 🔹 โหลด Environment Variables (สามารถตั้งค่าใน Google Cloud Run หรือใน Docker)
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-# สำหรับ Google Sheets API
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # path ไปยังไฟล์ JSON Credentials
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")  # Spreadsheet ID ของ Google Sheets
 SHEET_NAME = os.getenv("SHEET_NAME", "Data")  # ชื่อ sheet ที่จะเขียนข้อมูล
 
 print("LINE_ACCESS_TOKEN:", LINE_ACCESS_TOKEN)
 
-# 🔹 Dictionary เก็บข้อมูลชั่วคราวสำหรับ session ของผู้ใช้
+# 🔹 เก็บข้อมูล session ของผู้ใช้
 USER_SESSIONS = {}
 
-# 🔹 ตารางราคาพลาสติก (หน่วย: บาท/kg)
+# 🔹 ตารางราคาวัสดุ (บาท/kg)
 MATERIAL_COSTS = {
     "ABS": 200,
     "PC": 250,
@@ -99,16 +98,15 @@ def process_response(user_id, message_text):
             calculate_cost(user_id)
         else:
             send_message(user_id, "ไม่ได้เลือกใบเสนอราคา หากต้องการใบเสนอราคาลองพิมพ์ 'ต้องการ' ใหม่")
-            # หากไม่ต้องการ สามารถลบ session ได้หรือเก็บไว้เพื่อรอคำสั่งใหม่
             del USER_SESSIONS[user_id]
 
 def calculate_cost(user_id):
-    """ คำนวณต้นทุนจากข้อมูลที่ได้รับและบันทึกข้อมูลลง Google Sheets """
+    """ คำนวณต้นทุนและบันทึกข้อมูลลง Google Sheets """
     material = USER_SESSIONS[user_id]["material"]
     size = USER_SESSIONS[user_id]["size"]
     quantity = USER_SESSIONS[user_id]["quantity"]
 
-    # 🔹 แปลงขนาดชิ้นงานเป็น cm³
+    # คำนวณปริมาตร
     try:
         dimensions = list(map(int, size.split("x")))
         if len(dimensions) != 3:
@@ -118,61 +116,54 @@ def calculate_cost(user_id):
         send_message(user_id, "❌ ขนาดชิ้นงานไม่ถูกต้อง โปรดใช้รูปแบบ เช่น 10x15x5")
         return
 
-    # 🔹 คำนวณต้นทุน
+    # คำนวณน้ำหนักและต้นทุน
     material_cost_per_kg = MATERIAL_COSTS.get(material, 150)
-    density = 1.05  # หน่วย: g/cm³ (ค่าความหนาแน่นโดยประมาณ)
-    weight_kg = (volume * density) / 1000  # คำนวณน้ำหนักเป็น kg
+    density = 1.05  # g/cm³
+    weight_kg = (volume * density) / 1000
     total_cost = weight_kg * quantity * material_cost_per_kg
 
-    # 🔹 บันทึกข้อมูลใบเสนอราคาไปยัง Google Sheets
     try:
         write_to_sheet(user_id, material, size, quantity, volume, weight_kg, total_cost)
     except Exception as e:
         print(f"⚠️ เกิดข้อผิดพลาดในการบันทึกข้อมูลลง Google Sheets: {e}")
 
-    # 🔹 ส่งผลลัพธ์ให้ผู้ใช้
     result_text = (
         f"✅ คำนวณต้นทุนสำเร็จ:\n"
         f"📌 วัสดุ: {material}\n"
         f"📌 ขนาด: {size} cm³\n"
         f"📌 ปริมาตร: {volume} cm³\n"
-        f"📌 น้ำหนักโดยประมาณ: {weight_kg:.2f} kg\n"
+        f"📌 น้ำหนัก: {weight_kg:.2f} kg\n"
         f"📌 จำนวน: {quantity} ชิ้น\n"
         f"📌 ต้นทุนรวม: {total_cost:,.2f} บาท"
     )
     send_message(user_id, result_text)
-    # ลบ session ของผู้ใช้เพื่อรีเซ็ตข้อมูล
     del USER_SESSIONS[user_id]
 
 def write_to_sheet(user_id, material, size, quantity, volume, weight_kg, total_cost):
-    """ บันทึกข้อมูลใบเสนอราคาไปยัง Google Sheets โดยใช้ Google Sheets API """
+    """ บันทึกข้อมูลใบเสนอราคาไปยัง Google Sheets """
     SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
     credentials = service_account.Credentials.from_service_account_file(
         GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES)
     service = build('sheets', 'v4', credentials=credentials)
 
-    # เตรียมข้อมูลที่จะเขียน (List ของ List)
     values = [
         [user_id, material, size, quantity, volume, f"{weight_kg:.2f}", f"{total_cost:,.2f}"]
     ]
     body = {
         'values': values
     }
-    
     range_name = f"{SHEET_NAME}!A1"
-    
     result = service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=range_name,
         valueInputOption="RAW",
         body=body
     ).execute()
-    
     updated_cells = result.get('updates', {}).get('updatedCells', 0)
     print(f"{updated_cells} cells appended to Google Sheets.")
 
 def send_message(user_id, text):
-    """ ส่งข้อความกลับไปที่ LINE User """
+    """ ส่งข้อความไปยัง LINE User """
     headers = {
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
         "Content-Type": "application/json"
@@ -186,4 +177,6 @@ def send_message(user_id, text):
     print(f"📡 LINE Response: {response.status_code} {response.text}")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    # ใช้พอร์ตที่กำหนดผ่าน Environment Variable หรือ 8080 เป็นค่าเริ่มต้น
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
