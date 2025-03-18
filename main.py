@@ -1,14 +1,21 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 app = Flask(__name__)
 
 # 🔹 ใช้ Environment Variables
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-GAS_URL = os.getenv("GAS_URL")  # ใช้เชื่อม Google Sheets ถ้าต้องการบันทึกข้อมูล
+# สำหรับ Google Sheets API
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # path ไปยังไฟล์ JSON Credentials
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")  # Spreadsheet ID ของ Google Sheets
+SHEET_NAME = os.getenv("SHEET_NAME", "Data")  # ชื่อ sheet ที่จะเขียนข้อมูล
 
-# 🔹 Dictionary เก็บข้อมูลชั่วคราว
+print("LINE_ACCESS_TOKEN:", LINE_ACCESS_TOKEN)
+
+# 🔹 Dictionary เก็บข้อมูลชั่วคราวสำหรับ session ของผู้ใช้
 USER_SESSIONS = {}
 
 # 🔹 ตารางราคาพลาสติก (หน่วย: บาท/kg)
@@ -43,6 +50,7 @@ def webhook():
                 message_text = event["message"]["text"].strip()
                 print(f"📩 ข้อความจาก {user_id}: {message_text}")
 
+                # เริ่มต้นการคำนวณ
                 if message_text.lower() == "เริ่มคำนวณ":
                     start_questionnaire(user_id)
                 else:
@@ -53,12 +61,12 @@ def webhook():
         return jsonify({"error": "Method Not Allowed"}), 405
 
 def start_questionnaire(user_id):
-    """ เริ่มต้นถามข้อมูล """
+    """ เริ่มต้นถามข้อมูลจากผู้ใช้ """
     USER_SESSIONS[user_id] = {"step": 1}
     send_message(user_id, "กรุณาเลือกวัสดุที่ต้องการผลิต:\nABS, PC, Nylon, PP, PE, PVC, PET, PMMA, POM, PU")
 
 def process_response(user_id, message_text):
-    """ จัดการคำตอบของลูกค้า """
+    """ จัดการคำตอบจากผู้ใช้ในแต่ละขั้นตอน """
     if user_id not in USER_SESSIONS:
         send_message(user_id, "⚠️ กรุณาเริ่มคำนวณโดยพิมพ์ 'เริ่มคำนวณ'")
         return
@@ -82,13 +90,20 @@ def process_response(user_id, message_text):
         try:
             USER_SESSIONS[user_id]["quantity"] = int(message_text)
             USER_SESSIONS[user_id]["step"] = 4
-            send_message(user_id, "✅ ข้อมูลครบถ้วน! กำลังคำนวณต้นทุน...")
-            calculate_cost(user_id)
+            send_message(user_id, "ข้อมูลครบถ้วนแล้ว\nต้องการใบเสนอราคาหรือไม่? หากต้องการให้พิมพ์ 'ต้องการ'")
         except ValueError:
             send_message(user_id, "❌ กรุณากรอกจำนวนที่ถูกต้อง เช่น 100")
 
+    elif step == 4:
+        if message_text.strip() == "ต้องการ":
+            calculate_cost(user_id)
+        else:
+            send_message(user_id, "ไม่ได้เลือกใบเสนอราคา หากต้องการใบเสนอราคาลองพิมพ์ 'ต้องการ' ใหม่")
+            # หากไม่ต้องการ สามารถลบ session ได้หรือเก็บไว้เพื่อรอคำสั่งใหม่
+            del USER_SESSIONS[user_id]
+
 def calculate_cost(user_id):
-    """ คำนวณต้นทุนและบันทึกลง Google Sheets """
+    """ คำนวณต้นทุนจากข้อมูลที่ได้รับและบันทึกข้อมูลลง Google Sheets """
     material = USER_SESSIONS[user_id]["material"]
     size = USER_SESSIONS[user_id]["size"]
     quantity = USER_SESSIONS[user_id]["quantity"]
@@ -96,41 +111,65 @@ def calculate_cost(user_id):
     # 🔹 แปลงขนาดชิ้นงานเป็น cm³
     try:
         dimensions = list(map(int, size.split("x")))
-        volume = dimensions[0] * dimensions[1] * dimensions[2]  # คำนวณปริมาตร
-    except:
+        if len(dimensions) != 3:
+            raise ValueError("Invalid dimensions")
+        volume = dimensions[0] * dimensions[1] * dimensions[2]
+    except Exception as e:
         send_message(user_id, "❌ ขนาดชิ้นงานไม่ถูกต้อง โปรดใช้รูปแบบ เช่น 10x15x5")
         return
 
     # 🔹 คำนวณต้นทุน
-    material_cost_per_kg = MATERIAL_COSTS.get(material, 150)  # ดึงราคาตามวัสดุ
-    density = 1.05  # ค่าความหนาแน่นโดยประมาณ (g/cm³)
-    weight_kg = (volume * density) / 1000  # คำนวณน้ำหนักจากปริมาตร (kg)
+    material_cost_per_kg = MATERIAL_COSTS.get(material, 150)
+    density = 1.05  # หน่วย: g/cm³ (ค่าความหนาแน่นโดยประมาณ)
+    weight_kg = (volume * density) / 1000  # คำนวณน้ำหนักเป็น kg
     total_cost = weight_kg * quantity * material_cost_per_kg
 
-    # 🔹 บันทึกลง Google Sheets ผ่าน GAS
-    if GAS_URL:
-        data = {
-            "user_id": user_id,
-            "material": material,
-            "size": size,
-            "quantity": quantity,
-            "volume_cm3": volume,
-            "weight_kg": weight_kg,
-            "total_cost": total_cost
-        }
-        requests.post(GAS_URL, json=data)
+    # 🔹 บันทึกข้อมูลใบเสนอราคาไปยัง Google Sheets
+    try:
+        write_to_sheet(user_id, material, size, quantity, volume, weight_kg, total_cost)
+    except Exception as e:
+        print(f"⚠️ เกิดข้อผิดพลาดในการบันทึกข้อมูลลง Google Sheets: {e}")
 
     # 🔹 ส่งผลลัพธ์ให้ผู้ใช้
-    result_text = f"""✅ คำนวณต้นทุนสำเร็จ:
-📌 วัสดุ: {material}
-📌 ขนาด: {size} cm³
-📌 ปริมาตร: {volume} cm³
-📌 น้ำหนักโดยประมาณ: {weight_kg:.2f} kg
-📌 จำนวน: {quantity} ชิ้น
-📌 ต้นทุนรวม: {total_cost:,.2f} บาท
-"""
+    result_text = (
+        f"✅ คำนวณต้นทุนสำเร็จ:\n"
+        f"📌 วัสดุ: {material}\n"
+        f"📌 ขนาด: {size} cm³\n"
+        f"📌 ปริมาตร: {volume} cm³\n"
+        f"📌 น้ำหนักโดยประมาณ: {weight_kg:.2f} kg\n"
+        f"📌 จำนวน: {quantity} ชิ้น\n"
+        f"📌 ต้นทุนรวม: {total_cost:,.2f} บาท"
+    )
     send_message(user_id, result_text)
+    # ลบ session ของผู้ใช้เพื่อรีเซ็ตข้อมูล
     del USER_SESSIONS[user_id]
+
+def write_to_sheet(user_id, material, size, quantity, volume, weight_kg, total_cost):
+    """ บันทึกข้อมูลใบเสนอราคาไปยัง Google Sheets โดยใช้ Google Sheets API """
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+    credentials = service_account.Credentials.from_service_account_file(
+        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES)
+    service = build('sheets', 'v4', credentials=credentials)
+
+    # เตรียมข้อมูลที่จะเขียน (List ของ List)
+    values = [
+        [user_id, material, size, quantity, volume, f"{weight_kg:.2f}", f"{total_cost:,.2f}"]
+    ]
+    body = {
+        'values': values
+    }
+    
+    range_name = f"{SHEET_NAME}!A1"
+    
+    result = service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=range_name,
+        valueInputOption="RAW",
+        body=body
+    ).execute()
+    
+    updated_cells = result.get('updates', {}).get('updatedCells', 0)
+    print(f"{updated_cells} cells appended to Google Sheets.")
 
 def send_message(user_id, text):
     """ ส่งข้อความกลับไปที่ LINE User """
@@ -143,7 +182,6 @@ def send_message(user_id, text):
         "messages": [{"type": "text", "text": text}]
     }
     response = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=message)
-
     print(f"📤 ส่งข้อความไปที่ {user_id}: {text}")
     print(f"📡 LINE Response: {response.status_code} {response.text}")
 
