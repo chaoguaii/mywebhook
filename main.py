@@ -1,14 +1,13 @@
 from flask import Flask, request, jsonify
 import requests
 import os
-from google.oauth2 import service_account
+import google.auth
 from googleapiclient.discovery import build
 
 app = Flask(__name__)
 
-# 🔹 โหลด Environment Variables (สามารถตั้งค่าใน Google Cloud Run หรือใน Docker)
+# 🔹 โหลด Environment Variables (ตั้งค่าใน Cloud Run)
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # path ไปยังไฟล์ JSON Credentials
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")  # Spreadsheet ID ของ Google Sheets
 SHEET_NAME = os.getenv("SHEET_NAME", "Data")  # ชื่อ sheet ที่จะเขียนข้อมูล
 
@@ -142,8 +141,8 @@ def calculate_cost(user_id):
 def write_to_sheet(user_id, material, size, quantity, volume, weight_kg, total_cost):
     """ บันทึกข้อมูลใบเสนอราคาไปยัง Google Sheets """
     SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-    credentials = service_account.Credentials.from_service_account_file(
-        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES)
+    # ใช้ Application Default Credentials ที่ Cloud Run จัดเตรียมให้ (ADC)
+    credentials, project_id = google.auth.default(scopes=SCOPES)
     service = build('sheets', 'v4', credentials=credentials)
 
     values = [
